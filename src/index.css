@@ -70,4 +70,9 @@
   .glow-border {
     @apply border border-accent/30 hover:border-accent/50 transition-colors duration-500;
   }
+
+  .writing-mode-vertical {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+  }
 }

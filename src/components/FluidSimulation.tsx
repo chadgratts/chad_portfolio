@@ -3,17 +3,19 @@ import { useEffect, useRef } from 'react';
 // Based on Pavel Dobryakov's WebGL Fluid Simulation (MIT License)
 // https://github.com/PavelDoGreat/WebGL-Fluid-Simulation
 
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
 const config = {
-  SIM_RESOLUTION: 128,
-  DYE_RESOLUTION: 1024,
+  SIM_RESOLUTION: isMobile ? 48 : 128,
+  DYE_RESOLUTION: isMobile ? 384 : 1024,
   DENSITY_DISSIPATION: 1.0,
   VELOCITY_DISSIPATION: 0.2,
   PRESSURE: 0.8,
-  PRESSURE_ITERATIONS: 20,
+  PRESSURE_ITERATIONS: isMobile ? 8 : 20,
   CURL: 30,
   SPLAT_RADIUS: 0.25,
   SPLAT_FORCE: 6000,
-  SHADING: true,
+  SHADING: !isMobile,
   BLOOM: false,
   BLOOM_ITERATIONS: 8,
   BLOOM_RESOLUTION: 256,
@@ -592,7 +594,17 @@ function HSVtoRGB(h: number, s: number, v: number) {
 }
 
 function generateColor() {
-  const c = HSVtoRGB(Math.random(), 1.0, 1.0);
+  // Curated hue ranges: reds/pinks (0.9-1.0, 0.0-0.05), magentas/purples (0.7-0.9), blues/teals (0.5-0.7)
+  const ranges = [
+    [0.0, 0.05],   // red
+    [0.28, 0.38],  // bright green / neon green
+    [0.52, 0.7],   // blue / teal
+    [0.7, 0.85],   // purple / magenta
+    [0.9, 1.0],    // pink / red
+  ];
+  const range = ranges[Math.floor(Math.random() * ranges.length)];
+  const h = range[0] + Math.random() * (range[1] - range[0]);
+  const c = HSVtoRGB(h, 0.9, 1.0);
   c.r *= 0.15;
   c.g *= 0.15;
   c.b *= 0.15;
@@ -645,11 +657,28 @@ function hashCode(s: string) {
 export default function FluidSimulation() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     let animId: number;
+    let contextLost = false;
+
+    function onContextLost(e: Event) {
+      e.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(animId);
+    }
+
+    function onContextRestored() {
+      contextLost = false;
+      // Re-init will happen on next useEffect cycle
+      window.location.reload();
+    }
+
+    canvas.addEventListener('webglcontextlost', onContextLost);
+    canvas.addEventListener('webglcontextrestored', onContextRestored);
 
     try {
       const { gl, isWebGL2, halfFloatTexType, supportLinearFiltering, formatRGBA, formatRG, formatR } = getWebGLContext(canvas);
@@ -801,8 +830,9 @@ export default function FluidSimulation() {
       }
 
       function splatPointer(p: Pointer) {
-        const dx = p.deltaX * config.SPLAT_FORCE;
-        const dy = p.deltaY * config.SPLAT_FORCE;
+        const force = p.id >= 0 ? config.SPLAT_FORCE * 5 : config.SPLAT_FORCE;
+        const dx = p.deltaX * force;
+        const dy = p.deltaY * force;
         splat(p.texcoordX, p.texcoordY, dx, dy, p.color);
       }
 
@@ -1005,62 +1035,70 @@ export default function FluidSimulation() {
         // Keep pointer active for hover-based interaction
       }
 
+      // Touch handlers for mobile fluid splats (without preventing scroll)
+      // Use a single dedicated touch pointer (index 1) to avoid unbounded array growth
+      if (pointers.length < 2) {
+        pointers.push({
+          id: -1, texcoordX: 0, texcoordY: 0,
+          prevTexcoordX: 0, prevTexcoordY: 0,
+          deltaX: 0, deltaY: 0,
+          down: false, moved: false,
+          color: { r: 30, g: 0, b: 300 }
+        });
+      }
+
       function onTouchStart(e: TouchEvent) {
-        e.preventDefault();
-        const touches = e.targetTouches;
-        while (touches.length >= pointers.length)
-          pointers.push({
-            id: -1, texcoordX: 0, texcoordY: 0,
-            prevTexcoordX: 0, prevTexcoordY: 0,
-            deltaX: 0, deltaY: 0,
-            down: false, moved: false,
-            color: { r: 30, g: 0, b: 300 }
-          });
-        for (let i = 0; i < touches.length; i++) {
-          const posX = scaleByPixelRatio(touches[i].pageX);
-          const posY = scaleByPixelRatio(touches[i].pageY);
-          updatePointerDownData(pointers[i + 1], touches[i].identifier, posX, posY);
-        }
+        const touch = e.targetTouches[0];
+        if (!touch) return;
+        const posX = scaleByPixelRatio(touch.clientX);
+        const posY = scaleByPixelRatio(touch.clientY);
+        updatePointerDownData(pointers[1], touch.identifier, posX, posY);
       }
 
+      let lastTouchTime = 0;
       function onTouchMove(e: TouchEvent) {
-        e.preventDefault();
-        const touches = e.targetTouches;
-        for (let i = 0; i < touches.length; i++) {
-          const pointer = pointers[i + 1];
-          if (!pointer || !pointer.down) continue;
-          const posX = scaleByPixelRatio(touches[i].pageX);
-          const posY = scaleByPixelRatio(touches[i].pageY);
-          updatePointerMoveData(pointer, posX, posY);
-        }
+        const now = Date.now();
+        if (now - lastTouchTime < 60) return; // Throttle to ~16Hz
+        lastTouchTime = now;
+        const touch = e.targetTouches[0];
+        if (!touch) return;
+        const pointer = pointers[1];
+        if (!pointer.down) return;
+        const posX = scaleByPixelRatio(touch.clientX);
+        const posY = scaleByPixelRatio(touch.clientY);
+        updatePointerMoveData(pointer, posX, posY);
       }
 
-      function onTouchEnd(e: TouchEvent) {
-        const touches = e.changedTouches;
-        for (let i = 0; i < touches.length; i++) {
-          const pointer = pointers.find(p => p.id === touches[i].identifier);
-          if (pointer) pointer.down = false;
-        }
+      function onTouchEnd() {
+        pointers[1].down = false;
       }
 
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mousedown', onMouseDown);
       window.addEventListener('mouseup', onMouseUp);
-      window.addEventListener('touchstart', onTouchStart, { passive: false });
-      window.addEventListener('touchmove', onTouchMove, { passive: false });
+      window.addEventListener('touchstart', onTouchStart, { passive: true });
+      window.addEventListener('touchmove', onTouchMove, { passive: true });
       window.addEventListener('touchend', onTouchEnd);
 
       resizeCanvas();
-      multipleSplats(Math.floor(Math.random() * 20) + 5);
+      multipleSplats(isMobile ? Math.floor(Math.random() * 5) + 3 : Math.floor(Math.random() * 20) + 5);
+      let autoSplatTimer = 0;
 
       let lastUpdateTime = Date.now();
 
+      let splatsThisFrame = 0;
+      let frameCount = 0;
+
       function update() {
+        if (contextLost) return;
+        frameCount++;
         const now = Date.now();
         let dt = (now - lastUpdateTime) / 1000;
         dt = Math.min(dt, 0.016666);
         lastUpdateTime = now;
+        splatsThisFrame = 0;
 
+        
         const w = scaleByPixelRatio(canvas!.clientWidth);
         const h = scaleByPixelRatio(canvas!.clientHeight);
         if (canvas!.width !== w || canvas!.height !== h) {
@@ -1078,11 +1116,25 @@ export default function FluidSimulation() {
           }
         }
 
-        // Apply pointer inputs
+        // Auto-splat on mobile to keep colors alive
+        if (isMobile) {
+          autoSplatTimer += dt;
+          if (autoSplatTimer >= 3) {
+            autoSplatTimer = 0;
+            splat(Math.random(), Math.random(), 1000 * (Math.random() - 0.5), 1000 * (Math.random() - 0.5), (() => { const c = generateColor(); c.r *= 10; c.g *= 10; c.b *= 10; return c; })());
+            splatsThisFrame++;
+          }
+        }
+
+        // Apply pointer inputs (max 1 splat per frame on mobile, 2 on desktop)
+        const maxSplats = isMobile ? 1 : 2;
         pointers.forEach(p => {
-          if (p.moved) {
+          if (p.moved && splatsThisFrame < maxSplats) {
             p.moved = false;
             splatPointer(p);
+            splatsThisFrame++;
+          } else if (p.moved) {
+            p.moved = false;
           }
         });
 
@@ -1095,6 +1147,8 @@ export default function FluidSimulation() {
 
       return () => {
         cancelAnimationFrame(animId);
+        canvas!.removeEventListener('webglcontextlost', onContextLost);
+        canvas!.removeEventListener('webglcontextrestored', onContextRestored);
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mousedown', onMouseDown);
         window.removeEventListener('mouseup', onMouseUp);
@@ -1118,7 +1172,7 @@ export default function FluidSimulation() {
         width: '100%',
         height: '100%',
         zIndex: 0,
-        pointerEvents: 'none',
+        pointerEvents: 'auto',
       }}
     />
   );
